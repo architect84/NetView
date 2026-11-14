@@ -7,8 +7,7 @@ executable; no desktop environment or background service is required.
 ## Current MVP
 
 - Lists active IPv4 TCP connections.
-- Shows local and remote endpoints, connection state, PID, and process name/path.
-- Shows connection direction, with explicit markers for snapshot-based estimates.
+- Shows local and remote addresses with separate port columns, connection state, PID, and process name/path.
 - Uses the Windows IP Helper API on Windows.
 - Reads `/proc/net/tcp` and process file descriptors on Linux.
 - Supports periodic refresh with `--watch`.
@@ -57,10 +56,10 @@ snapshot. `--watch` requires an interactive terminal and cannot be combined with
 - `Page Up` / `Page Down`: move by ten connections.
 - `Home` / `End`: select the first / last connection.
 - `1` / `2` / `3` / `4` / `5`: sort by Local / Remote / State / PID / Process.
-  `6` sorts Direction; existing sort keys are unchanged.
+  `6` sorts Local Port; `7` sorts Remote Port. Addresses and ports sort independently.
   Selecting a new column starts ascending; press its key again to reverse direction.
   The active header shows `↑` (ascending) or `↓` (descending). Default: PID ascending.
-- `/`: search all columns (local endpoint, remote endpoint, state, PID, direction, and process)
+- `/`: search all columns (local/remote addresses and ports, state, PID, and process)
   using a case-insensitive substring; results update as you type.
 - `Enter`: keep the filter; `Esc` while editing: restore the previous filter.
 - `c`: clear the search and any startup `--process` filter.
@@ -81,27 +80,6 @@ Some processes can only be identified when the program is run with elevated
 privileges. On Linux, process ownership also limits which `/proc/<pid>/fd` entries
 are visible.
 
-### Connection direction
-
-The Direction column is shown in both the TUI and `--snapshot` output. Direction
-means which side initiated the connection, not the direction of individual packets:
-
-- `LISTENING`: a socket accepting connections, not an established connection.
-- `INBOUND` / `OUTBOUND`: observed in `SYN-RECV` / `SYN-SENT`, respectively.
-- `INBOUND?`: inferred from a matching local listener (address, port, and compatible
-  PID; wildcard listeners and unavailable PIDs are supported).
-- `OUTBOUND?`: an established connection with a known PID and no matching listener.
-- `UNKNOWN`: insufficient information, such as an unowned connection or a closing
-  connection first seen after its listener disappeared.
-
-`?` labels are estimates, not authoritative OS metadata. Closed/invisible listeners,
-socket ownership changes, shared ports, and simultaneous opens can make inference
-ambiguous. No low-port/high-port guessing is used. Observed and inferred roles are
-retained across refreshes while the same PID/local/remote tuple remains present,
-and discarded when it disappears; tuple reuse between refreshes cannot be detected.
-Direction is calculated before UI filters, so filtering out listeners does not
-remove their inference context. Search for `inbound`, `outbound`, `listening`, or
-`unknown` with `/`; press `6` to sort direction.
 ## Development
 
 ```sh

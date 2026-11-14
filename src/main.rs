@@ -3,7 +3,6 @@ use clap::Parser;
 use std::{io::IsTerminal, time::Duration};
 
 mod collector;
-mod direction;
 mod tui;
 
 #[derive(Parser, Debug)]
@@ -47,19 +46,16 @@ fn main() -> Result<()> {
 
 fn print_table(app: &tui::App) {
     println!(
-        "{:<22} {:<22} {:<13} {:>7} {:<10} PROCESS",
-        "LOCAL", "REMOTE", "STATE", "PID", "DIRECTION"
+        "{:<15} {:>10} {:<15} {:>11} {:<13} {:>7} PROCESS",
+        "LOCAL", "LOCAL PORT", "REMOTE", "REMOTE PORT", "STATE", "PID"
     );
-    println!("{}", "-".repeat(116));
+    println!("{}", "-".repeat(114));
     for entry in &app.visible {
+        let (local, local_port) = collector::endpoint_parts(&entry.local);
+        let (remote, remote_port) = collector::endpoint_parts(&entry.remote);
         println!(
-            "{:<22} {:<22} {:<13} {:>7} {:<10} {}",
-            entry.local,
-            entry.remote,
-            entry.state,
-            entry.pid,
-            app.direction(entry).label(),
-            entry.process
+            "{:<15} {:>10} {:<15} {:>11} {:<13} {:>7} {}",
+            local, local_port, remote, remote_port, entry.state, entry.pid, entry.process
         );
     }
     println!("\n{} TCP entries", app.visible.len());

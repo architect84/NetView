@@ -1,5 +1,4 @@
-use crate::collector::{self, TcpConnection};
-use crate::direction::{Direction, Directions};
+use crate::collector::{self, endpoint_parts, TcpConnection};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -22,24 +21,27 @@ enum SortColumn {
     State,
     Pid,
     Process,
-    Direction,
+    LocalPort,
+    RemotePort,
 }
 
 impl SortColumn {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Local,
         Self::Remote,
         Self::State,
         Self::Pid,
         Self::Process,
-        Self::Direction,
+        Self::LocalPort,
+        Self::RemotePort,
     ];
-    const DISPLAY: [Self; 6] = [
+    const DISPLAY: [Self; 7] = [
         Self::Local,
+        Self::LocalPort,
         Self::Remote,
+        Self::RemotePort,
         Self::State,
         Self::Pid,
-        Self::Direction,
         Self::Process,
     ];
 
@@ -50,25 +52,41 @@ impl SortColumn {
             Self::State => "STATE",
             Self::Pid => "PID",
             Self::Process => "PROCESS",
-            Self::Direction => "DIRECTION",
+            Self::LocalPort => "LOCAL PORT",
+            Self::RemotePort => "REMOTE PORT",
         }
     }
 
-    fn compare(self, a: &TcpConnection, b: &TcpConnection, directions: &Directions) -> Ordering {
+    fn compare(self, a: &TcpConnection, b: &TcpConnection) -> Ordering {
         match self {
-            Self::Local => compare_endpoints(&a.local, &b.local),
-            Self::Remote => compare_endpoints(&a.remote, &b.remote),
+            Self::Local => compare_endpoint_by(&a.local, &b.local, |a, b| a.ip().cmp(&b.ip())),
+            Self::Remote => compare_endpoint_by(&a.remote, &b.remote, |a, b| a.ip().cmp(&b.ip())),
+            Self::LocalPort => {
+                compare_endpoint_by(&a.local, &b.local, |a, b| a.port().cmp(&b.port()))
+            }
+            Self::RemotePort => {
+                compare_endpoint_by(&a.remote, &b.remote, |a, b| a.port().cmp(&b.port()))
+            }
             Self::State => a.state.to_lowercase().cmp(&b.state.to_lowercase()),
             Self::Pid => a.pid.cmp(&b.pid),
             Self::Process => a.process.to_lowercase().cmp(&b.process.to_lowercase()),
-            Self::Direction => directions.get(a).label().cmp(directions.get(b).label()),
         }
     }
 }
 
 fn compare_endpoints(a: &str, b: &str) -> Ordering {
+    compare_endpoint_by(a, b, |a, b| {
+        a.ip().cmp(&b.ip()).then_with(|| a.port().cmp(&b.port()))
+    })
+}
+
+fn compare_endpoint_by(
+    a: &str,
+    b: &str,
+    compare: impl FnOnce(SocketAddr, SocketAddr) -> Ordering,
+) -> Ordering {
     match (a.parse::<SocketAddr>(), b.parse::<SocketAddr>()) {
-        (Ok(a), Ok(b)) => a.ip().cmp(&b.ip()).then_with(|| a.port().cmp(&b.port())),
+        (Ok(a), Ok(b)) => compare(a, b),
         // Keep malformed or non-IP endpoints in a separate group for a total ordering.
         (Ok(_), Err(_)) => Ordering::Less,
         (Err(_), Ok(_)) => Ordering::Greater,
@@ -78,7 +96,6 @@ fn compare_endpoints(a: &str, b: &str) -> Ordering {
 
 pub(crate) struct App {
     entries: Vec<TcpConnection>,
-    directions: Directions,
     pub(crate) visible: Vec<TcpConnection>,
     table: TableState,
     sort_column: SortColumn,
@@ -97,7 +114,6 @@ impl App {
     pub(crate) fn new(listening: bool, process_filter: String) -> Self {
         Self {
             entries: Vec::new(),
-            directions: Directions::default(),
             visible: Vec::new(),
             table: TableState::default(),
             sort_column: SortColumn::Pid,
@@ -114,12 +130,8 @@ impl App {
     }
 
     pub(crate) fn set_entries(&mut self, entries: Vec<TcpConnection>) {
-        self.directions.update(&entries);
         self.entries = entries;
         self.refilter();
-    }
-    pub(crate) fn direction(&self, entry: &TcpConnection) -> Direction {
-        self.directions.get(entry)
     }
 
     fn refilter(&mut self) {
@@ -141,7 +153,6 @@ impl App {
                     entry.remote.as_str(),
                     entry.state.as_str(),
                     entry.process.as_str(),
-                    self.direction(entry).label(),
                 ]
                 .iter()
                 .any(|value| value.to_lowercase().contains(&query))
@@ -152,7 +163,7 @@ impl App {
         self.visible.sort_by(|a, b| {
             let order = self
                 .sort_column
-                .compare(a, b, &self.directions)
+                .compare(a, b)
                 .then_with(|| a.pid.cmp(&b.pid))
                 .then_with(|| compare_endpoints(&a.local, &b.local))
                 .then_with(|| compare_endpoints(&a.remote, &b.remote))
@@ -244,7 +255,7 @@ impl App {
             return false;
         }
         match key.code {
-            KeyCode::Char(c @ '1'..='6') => {
+            KeyCode::Char(c @ '1'..='7') => {
                 self.sort_by(SortColumn::ALL[(c as u8 - b'1') as usize]);
             }
             KeyCode::Char('q') | KeyCode::Esc => return true,
@@ -306,17 +317,20 @@ impl App {
         );
 
         let rows = self.visible.iter().map(|entry| {
+            let (local, local_port) = endpoint_parts(&entry.local);
+            let (remote, remote_port) = endpoint_parts(&entry.remote);
             let color = match entry.state.as_str() {
                 "ESTABLISHED" => Color::Green,
                 "LISTEN" => Color::Cyan,
                 _ => Color::Yellow,
             };
             Row::new(vec![
-                Cell::from(entry.local.clone()),
-                Cell::from(entry.remote.clone()),
+                Cell::from(local),
+                Cell::from(local_port),
+                Cell::from(remote),
+                Cell::from(remote_port),
                 Cell::from(entry.state.clone()).style(Style::default().fg(color)),
                 Cell::from(entry.pid.to_string()),
-                Cell::from(self.direction(entry).label()),
                 Cell::from(entry.process.clone()),
             ])
         });
@@ -328,11 +342,12 @@ impl App {
         let table = Table::new(
             rows,
             [
-                Constraint::Length(22),
-                Constraint::Length(22),
+                Constraint::Length(15),
+                Constraint::Length(12),
+                Constraint::Length(15),
+                Constraint::Length(13),
                 Constraint::Length(13),
                 Constraint::Length(7),
-                Constraint::Length(11),
                 Constraint::Min(12),
             ],
         )
@@ -365,13 +380,8 @@ impl App {
             .and_then(|i| self.visible.get(i))
             .map(|entry| {
                 format!(
-                    "{} → {}  [{}]  PID {}  Direction: {}\nProcess: {}",
-                    entry.local,
-                    entry.remote,
-                    entry.state,
-                    entry.pid,
-                    self.direction(entry).label(),
-                    entry.process
+                    "{} → {}  [{}]  PID {}\nProcess: {}",
+                    entry.local, entry.remote, entry.state, entry.pid, entry.process
                 )
             })
             .unwrap_or_else(|| "No connection selected.".to_owned());
@@ -420,12 +430,10 @@ impl App {
             ],
             None => vec![
                 Line::from(
-                    "Sort: 1 local · 2 remote · 3 state · 4 PID · 5 process · 6 direction (repeat: reverse)",
+                    "Sort: 1 local · 6 local port · 2 remote · 7 remote port · 3 state · 4 PID · 5 process (repeat: reverse)",
                 ),
                 Line::from("↑/↓ j/k select · PgUp/PgDn scroll · Home/End · / search · l listeners"),
-                Line::from(
-                    "Space pause · r refresh · c clear · q/Esc quit · Ctrl+C quit | Direction ?: estimated",
-                ),
+                Line::from("Space pause · r refresh · c clear · q/Esc quit · Ctrl+C quit"),
             ],
         };
         frame.render_widget(Paragraph::new(footer), areas[4]);
@@ -494,54 +502,39 @@ mod tests {
     }
 
     #[test]
-    fn direction_search_uses_unfiltered_snapshot_and_updates_on_refresh() {
-        let local = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 8080)).to_string();
-        let remote = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 50000)).to_string();
-        let listener = TcpConnection {
-            local: local.clone(),
-            remote: SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)).to_string(),
-            state: "LISTEN".into(),
-            pid: 7,
-            process: "listener".into(),
-        };
-        let mut connection = TcpConnection {
-            local,
-            remote,
-            state: "ESTABLISHED".into(),
-            pid: 7,
-            process: "worker".into(),
-        };
-        let mut app = App::new(false, "worker".into());
-        app.set_entries(vec![listener, connection.clone()]);
-        app.query = "iNbOuNd".into();
-        app.refilter();
-        assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.direction(&app.visible[0]), Direction::LikelyInbound);
-        connection.state = "CLOSE-WAIT".into();
-        app.set_entries(vec![connection]);
-        assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.direction(&app.visible[0]), Direction::LikelyInbound);
-        app.query = "outbound".into();
-        app.refilter();
-        assert!(app.visible.is_empty());
+    fn port_sort_keys_remain_text_while_searching() {
+        let mut app = populated();
+        press(&mut app, KeyCode::Char('6'));
+        assert_eq!(app.sort_column, SortColumn::LocalPort);
+        assert!(!app.sort_descending);
+        press(&mut app, KeyCode::Char('7'));
+        assert_eq!(app.sort_column, SortColumn::RemotePort);
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('6'));
+        press(&mut app, KeyCode::Char('7'));
+        assert_eq!(app.query, "67");
+        assert_eq!(app.sort_column, SortColumn::RemotePort);
+        assert!(!app.sort_descending);
     }
 
     #[test]
-    fn direction_sort_is_preserved_during_search_and_refresh() {
-        let mut app = populated();
-        press(&mut app, KeyCode::Char('6'));
-        assert_eq!(app.sort_column, SortColumn::Direction);
-        assert!(!app.sort_descending);
-        press(&mut app, KeyCode::Char('6'));
-        assert!(app.sort_descending);
-        let entries = app.entries.clone();
-        app.set_entries(entries);
-        assert_eq!(app.sort_column, SortColumn::Direction);
-        assert!(app.sort_descending);
-        press(&mut app, KeyCode::Char('/'));
-        press(&mut app, KeyCode::Char('6'));
-        assert_eq!(app.query, "6");
-        assert!(app.sort_descending);
+    fn address_and_port_comparisons_are_independent() {
+        let mut a = entry(1, "a", "ESTABLISHED");
+        let mut b = entry(2, "b", "ESTABLISHED");
+        a.local = "192.0.2.10:9".into();
+        b.local = "192.0.2.2:100".into();
+        a.remote = "[::10]:65535".into();
+        b.remote = "[::2]:0".into();
+        assert_eq!(SortColumn::Local.compare(&a, &b), Ordering::Greater);
+        assert_eq!(SortColumn::LocalPort.compare(&a, &b), Ordering::Less);
+        assert_eq!(SortColumn::Remote.compare(&a, &b), Ordering::Greater);
+        assert_eq!(SortColumn::RemotePort.compare(&a, &b), Ordering::Greater);
+        b.local = "192.0.2.10:100".into();
+        assert_eq!(SortColumn::Local.compare(&a, &b), Ordering::Equal);
+        b.local = "192.0.2.2:9".into();
+        assert_eq!(SortColumn::LocalPort.compare(&a, &b), Ordering::Equal);
+        b.remote = "invalid".into();
+        assert_eq!(SortColumn::RemotePort.compare(&a, &b), Ordering::Less);
     }
 
     #[test]
@@ -571,7 +564,7 @@ mod tests {
             };
             let key = KeyCode::Char(char::from(b'1' + i as u8));
             press(&mut app, key);
-            let expected = if matches!(column, SortColumn::Process | SortColumn::Direction) {
+            let expected = if matches!(column, SortColumn::Process | SortColumn::RemotePort) {
                 vec![10, 2]
             } else {
                 vec![2, 10]
@@ -647,7 +640,7 @@ mod tests {
         assert_eq!(app.sort_column, SortColumn::Pid);
         assert!(!app.sort_descending);
         press(&mut app, KeyCode::Enter);
-        for c in '1'..='6' {
+        for c in '1'..='7' {
             press(&mut app, KeyCode::Char(c));
             assert_eq!(app.table.selected(), None);
         }
@@ -670,7 +663,8 @@ mod tests {
             (None, "PID ↑"),
             (Some('4'), "PID ↓"),
             (Some('5'), "PROCESS ↑"),
-            (Some('6'), "DIRECTION ↑"),
+            (Some('6'), "LOCAL PORT ↑"),
+            (Some('7'), "REMOTE PORT ↑"),
         ] {
             if let Some(key) = key {
                 press(&mut app, KeyCode::Char(key));
@@ -698,7 +692,16 @@ mod tests {
             pid: 45678,
             process: "/opt/MyService".into(),
         };
-        for query in ["LOCAL.EXAMPLE", ":9443", "eStAbLiShEd", "567", "MYSERVICE"] {
+        for query in [
+            "LOCAL.EXAMPLE",
+            "8123",
+            "REMOTE.EXAMPLE",
+            "9443",
+            ":9443",
+            "eStAbLiShEd",
+            "567",
+            "MYSERVICE",
+        ] {
             let mut app = App::new(false, String::new());
             app.set_entries(vec![connection.clone()]);
             press(&mut app, KeyCode::Char('/'));
@@ -854,8 +857,19 @@ mod tests {
         assert!(text.contains("sshd"));
         assert!(text.contains("Selected connection"));
         assert!(text.contains("All columns:"));
-        assert!(text.contains("DIRECTION"));
-        assert!(text.contains("LISTENING"));
+        for header in [
+            "LOCAL",
+            "LOCAL PORT",
+            "REMOTE",
+            "REMOTE PORT",
+            "STATE",
+            "PID",
+            "PROCESS",
+        ] {
+            assert!(text.contains(header), "missing {header}");
+        }
+        assert!(!text.contains("DIRECTION"));
+        assert!(!text.contains("Direction:"));
         assert!(text.contains("test failure"));
     }
 
